@@ -1,0 +1,100 @@
+# Step 1: Install required libraries
+!pip install -q google-generativeai tabulate
+
+# Step 2: Upload the CSV
+from google.colab import files
+uploaded = files.upload()
+
+# Step 3: Imports
+import pandas as pd
+from tabulate import tabulate
+import google.generativeai as genai
+
+# Step 4: Configure Gemini API
+genai.configure(api_key='AIzaSyC1Pyr6nhni9dYQTtVhkUkIuODsNsAXiCE')
+
+# Step 5: Read uploaded CSV
+file_path = list(uploaded.keys())[0]
+bugs_df = pd.read_csv(file_path)
+bugs_df.columns = bugs_df.columns.str.strip().str.lower()  # Normalize headers
+
+# Step 6: Identify columns
+priority_column = next((col for col in bugs_df.columns if col in ['priority', 'bug priority']), None)
+component_column = next((col for col in bugs_df.columns if 'component' in col), None)
+status_column = next((col for col in bugs_df.columns if col == 'status'), None)
+
+# Step 7: Check required columns
+if not priority_column or not component_column or not status_column:
+    print("❌ Missing required columns: 'Priority', 'Component', or 'Status'. Found columns:", bugs_df.columns.tolist())
+else:
+    # Step 8: Normalize values
+    bugs_df[priority_column] = bugs_df[priority_column].str.strip().str.lower()
+    bugs_df[status_column] = bugs_df[status_column].str.strip().str.lower()
+
+    # ✅ Step 9: QA PASSED summary
+    passed_df = bugs_df[bugs_df[status_column] == 'qa passed']
+    passed_summary = passed_df.groupby(component_column).agg(
+        QA_Passed_Bugs=(status_column, 'count')
+    ).reset_index()
+
+    print("\n📋 Bugs in 'QA PASSED' Status:\n")
+    print(tabulate(passed_summary, headers='keys', tablefmt='grid'))
+
+    # Step 10: Exclude QA PASSED from analysis
+    filtered_df = bugs_df[bugs_df[status_column] != 'qa passed']
+    print(f"\n✅ Remaining rows after filtering: {len(filtered_df)}")
+
+    # Step 11: Group remaining bugs
+    grouped = filtered_df.groupby(component_column).agg(
+        Total_Bugs=(priority_column, 'count'),
+        Blocker_Bugs=(priority_column, lambda x: x.eq('blocker').sum()),
+        High_Bugs=(priority_column, lambda x: x.eq('high').sum())
+    ).reset_index()
+
+    # Step 12: AI risk scoring
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    def get_ai_analysis(row):
+        prompt = (
+            f"You are a QA lead reviewing bug data for an AI-based application.\n\n"
+            f"Component: {row[component_column]}\n"
+            f"Total Bugs: {row['Total_Bugs']}\n"
+            f"Blocker Bugs: {row['Blocker_Bugs']}\n"
+            f"High Bugs: {row['High_Bugs']}\n\n"
+            f"Estimate a **Risk Score** on a scale from 0 (no risk) to 10 (high risk).\n"
+            f"Then recommend one of these test strategies:\n"
+            f"- Full Regression\n- Sanity Testing\n- Smoke Testing\n\n"
+            f"Respond in the following format:\n"
+            f"Risk Score: <number out of 10>\n"
+            f"Recommended Strategy: <strategy name>\n"
+            f"Justification:\n"
+            f"- Point 1\n- Point 2\n- etc."
+        )
+        try:
+            response = model.generate_content(prompt).text.strip()
+            lines = response.splitlines()
+            risk_score = next((line.split(":")[1].strip() for line in lines if "risk score" in line.lower()), "N/A")
+            strategy = next((line.split(":")[1].strip() for line in lines if "strategy" in line.lower()), "N/A")
+            justification = "\n".join([line for line in lines if line.startswith("-")])
+            return pd.Series([risk_score, f"Strategy: {strategy}\n{justification}"])
+        except Exception as e:
+            return pd.Series(["❌", f"❌ Error: {e}"])
+
+    print("\n🤖 Asking Gemini AI for risk scores and strategy suggestions...")
+    grouped[['AI_Risk_Score', 'AI_Suggested_Action']] = grouped.apply(get_ai_analysis, axis=1)
+
+    # Step 13: Format output
+    grouped_str = grouped.copy()
+    for col in grouped_str.columns:
+        grouped_str[col] = grouped_str[col].astype(str).str.strip()
+    grouped_str['AI_Suggested_Action'] = grouped_str['AI_Suggested_Action'].apply(
+        lambda x: x if len(x) <= 100 else x[:97] + "..."
+    )
+
+    print("\n📊 Risk-Based Test Plan:\n")
+    print(tabulate(grouped_str, headers='keys', tablefmt='fancy_grid', showindex=False))
+
+    # Step 14: Save to CSV
+    output_file = "risk_based_test_plan_with_ai.csv"
+    grouped.to_csv(output_file, index=False)
+    print(f"\n✅ File saved as '{output_file}'")
+    files.download(output_file)
