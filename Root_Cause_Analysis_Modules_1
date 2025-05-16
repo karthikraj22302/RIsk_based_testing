@@ -1,0 +1,104 @@
+#Apply AI models (even basic ML models) to automatically analyze logs and crash reports to suggest the probable cause used:RandomForestClassifier
+#( pinpoint crash triggers or common failures.)
+!pip install -q google-generativeai scikit-learn
+
+# Step 2: Imports
+import pandas as pd
+import google.generativeai as genai
+from google.colab import files
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report
+import time
+
+# Step 3: API Key for Gemini
+genai.configure(api_key="AIzaSyC1Pyr6nhni9dYQTtVhkUkIuODsNsAXiCE")
+
+# Step 4: Upload CSV file
+uploaded = files.upload()
+file_path = next(iter(uploaded))
+df = pd.read_csv(file_path)
+df.columns = df.columns.str.strip()
+
+# Step 5: Define main columns
+text_column = 'Summary'
+label_column = 'Component'
+
+# Step 6: Clean data
+df = df[[text_column, label_column, 'Status']].dropna()
+df[text_column] = df[text_column].astype(str).str.lower()
+df['Status'] = df['Status'].astype(str).str.strip().str.lower()
+
+# ✅ Step 7: Count total, passed, and remaining bugs
+total_bugs = len(df)
+qa_passed_bugs = len(df[df['Status'] == 'qa passed'])
+remaining_bugs = total_bugs - qa_passed_bugs
+
+print(f"\n🐞 Total number of bugs: {total_bugs}")
+print(f"✅ QA Passed bugs count: {qa_passed_bugs}")
+print(f"🔍 Remaining bugs after filtering: {remaining_bugs}\n")
+
+# Step 8: Filter out QA Passed bugs
+df = df[df['Status'] != 'qa passed']
+
+# ==========================
+# 🧠 Part 1: ML Classification
+# ==========================
+print("\n🧠 Running ML-based RCA Classification...\n")
+
+X_train, X_test, y_train, y_test = train_test_split(df[text_column], df[label_column], test_size=0.2, random_state=42)
+vectorizer = TfidfVectorizer()
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train_vec, y_train)
+y_pred = clf.predict(X_test_vec)
+
+report = classification_report(y_test, y_pred, digits=2)
+print("\n📊 ML-Based Classification Report:\n")
+print(report)
+
+# ==========================
+# 🤖 Part 2: Gemini AI RCA
+# ==========================
+model = genai.GenerativeModel("gemini-1.5-flash")
+rca_outputs = []
+max_retries = 3
+retry_delay = 5  # seconds
+
+print(f"\n🤖 Generating AI-inferred Root Causes for {len(df)} bugs...\n")
+
+for i, summary in enumerate(df[text_column], start=1):
+    prompt = f"""
+You are a QA expert performing root cause analysis based on bug descriptions.
+Read the following bug summary and determine the most likely technical cause.
+Respond only with the most probable root cause in a concise technical phrase (e.g., "null pointer exception").
+Bug Summary: {summary}
+Probable root cause:
+"""
+
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content(prompt).text.strip()
+            break
+        except Exception as e:
+            print(f"⚠️ Retry {attempt+1} failed: {e}")
+            time.sleep(retry_delay)
+            response = f"❌ Error after {max_retries} retries: {str(e)}"
+
+    rca_outputs.append({
+        "Bug Summary": summary,
+        "AI-Inferred Root Cause": response
+    })
+    print(f"✅ Processed {i}/{len(df)}")
+
+# Step 9: Save AI RCA output
+ai_rca_df = pd.DataFrame(rca_outputs)
+ai_output_file = "ai_inferred_root_causes.csv"
+ai_rca_df.to_csv(ai_output_file, index=False)
+print(f"\n✅ AI RCA saved to: {ai_output_file}")
+files.download(ai_output_file)
+
