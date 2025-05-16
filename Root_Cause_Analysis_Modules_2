@@ -1,0 +1,96 @@
+#the Bugzilla bug data and get the RCA category and RCA Reason using  AI_GENAI_API_KEY tool
+!pip install -q google-generativeai
+
+import pandas as pd
+import time
+import google.generativeai as genai
+from google.colab import files
+
+# Load Bugzilla data
+GENAI_API_KEY = "AIzaSyC1Pyr6nhni9dYQTtVhkUkIuODsNsAXiCE"
+uploaded = files.upload()
+file_path = next(iter(uploaded))
+df = pd.read_csv(file_path)
+df.columns = df.columns.str.strip()
+
+# Define column names
+text_column = 'Summary'
+label_column = 'Component'
+priority_column = 'Priority'
+status_column = 'Status'  # ✅ Assuming there's a 'Status' column like "qa passed"
+
+# ✅ Clean and lowercase summary
+df[text_column] = df[text_column].astype(str).str.lower()
+
+# ✅ Count total, passed, and remaining bugs
+total_bugs = len(df)
+qa_passed_bugs = len(df[df[status_column].str.lower() == 'qa passed'])
+remaining_bugs = total_bugs - qa_passed_bugs
+
+print(f"\n🐞 Total number of bugs: {total_bugs}")
+print(f"✅ QA Passed bugs count: {qa_passed_bugs}")
+print(f"🔍 Remaining bugs after filtering: {remaining_bugs}\n")
+# Filter out QA Passed bugs
+bugs_df = df[df[status_column].str.lower() != 'qa passed']
+# Filter only Blocker and High priority bugs
+bugs_df = bugs_df[[text_column, label_column, priority_column]].dropna()
+bugs_df = bugs_df[bugs_df[priority_column].str.lower().isin(['blocker', 'high'])]
+
+try:
+    genai.configure(api_key=GENAI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    model.generate_content("Test message.")  # Optional: test API
+    print("✅ API key is valid. Proceeding...")
+except Exception as e:
+    raise RuntimeError(f"❌ API key error: {e}")
+
+# Batch setup
+batch_size = 10
+delay_seconds = 10
+max_retries = 3
+retry_delay = 5
+
+# Collect results
+rca_outputs = []
+print(f"\n🔍 Generating RCA for {len(bugs_df)} filtered bugs...\n")
+
+# Process in batches
+for batch_start in range(0, len(bugs_df), batch_size):
+    batch_df = bugs_df.iloc[batch_start:batch_start + batch_size]
+    print(f"\n🚀 Processing batch {batch_start + 1} to {batch_start + len(batch_df)}")
+
+    for i, row in batch_df.iterrows():
+        summary = row[text_column]
+        actual = row[label_column]
+        priority = row[priority_column]
+
+        prompt = f"""You're a QA analyst. Based on the bug description below, infer the most likely root cause.\n\nBug Summary: {summary}\n\nGive a concise 1–2 sentence explanation."""
+
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(prompt).text.strip()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"⚠️ Retry {attempt + 1} for bug {i}: {e}")
+                    time.sleep(retry_delay)
+                else:
+                    response = f"❌ Gemini Error after {max_retries} attempts: {str(e)}"
+
+        rca_outputs.append({
+            "Bug Summary": summary,
+            "Actual Component": actual,
+            "Priority": priority,
+            "AI-Inferred Root Cause": response
+        })
+
+    print(f"✅ Batch {batch_start + 1}–{batch_start + len(batch_df)} done. Waiting {delay_seconds}s...")
+    time.sleep(delay_seconds)
+
+# Save results
+output_file = "ai_rca_high_blocker_priority_with_retry.csv"
+pd.DataFrame(rca_outputs).to_csv(output_file, index=False)
+print(f"\n✅ RCA results saved to '{output_file}'")
+
+# Download
+files.download(output_file)
